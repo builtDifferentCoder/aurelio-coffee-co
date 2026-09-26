@@ -2,18 +2,13 @@ import os
 from typing import Any, Dict, List, Optional
 
 import chromadb
-from chromadb.utils import embedding_functions
 
 
 def get_collection():
     """Load the Chroma persistent client and aurelio_kb collection."""
     persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma_db")
     client = chromadb.PersistentClient(path=persist_dir)
-    embedding_fn = embedding_functions.DefaultEmbeddingFunction()
-    return client.get_or_create_collection(
-        name="aurelio_kb",
-        embedding_function=embedding_fn,
-    )
+    return client.get_or_create_collection("aurelio_kb")
 
 
 def retrieve(

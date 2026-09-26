@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import chromadb
-from chromadb.utils import embedding_functions
 import frontmatter
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 
@@ -28,11 +27,7 @@ def ingest_knowledge_base():
     print(f"Connecting to Chroma at: {persist_dir}")
     client = chromadb.PersistentClient(path=persist_dir)
 
-    embedding_fn = embedding_functions.DefaultEmbeddingFunction()
-    collection = client.get_or_create_collection(
-        name="aurelio_kb",
-        embedding_function=embedding_fn,
-    )
+    collection = client.get_or_create_collection("aurelio_kb")
 
     kb_dir = get_kb_directory()
     print(f"Reading markdown files from: {kb_dir}")
