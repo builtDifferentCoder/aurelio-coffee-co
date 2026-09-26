@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Any, Dict, List
 
 from langchain_anthropic import ChatAnthropic
@@ -27,6 +28,9 @@ ESCALATION_KEYWORDS = [
     "agent",
     "speak to someone",
     "cancel and charge",
+    "money back",
+    "get my money",
+    "want my money",
 ]
 
 
@@ -64,6 +68,10 @@ def router_node(state: AgentState) -> Dict[str, Any]:
 
     # 1. Hardcoded keyword check for immediate escalation
     if any(keyword in lower_text for keyword in ESCALATION_KEYWORDS):
+        return {"intent": "escalate"}
+
+    # Pattern check: "cancel" co-occurring with "refund", "money", or "back" anywhere in the message
+    if re.search(r"\bcancel\w*\b.*?\b(refund|money|back)\b|\b(refund|money|back)\b.*?\bcancel\w*\b", lower_text, re.DOTALL):
         return {"intent": "escalate"}
 
     # 2. Otherwise classify via Claude Haiku
@@ -146,41 +154,50 @@ def tool_node(state: AgentState) -> Dict[str, Any]:
             "messages": [tool_call_response],
         }
 
-    tool_call = tool_call_response.tool_calls[0]
-    tool_name = tool_call["name"]
-    tool_args = tool_call["args"]
+    # Execute every tool call and construct a ToolMessage for EACH tool_use_id
+    tool_messages = []
+    tool_outputs = []
 
-    selected_tool = tool_map.get(tool_name)
-    if selected_tool:
-        try:
-            tool_output = selected_tool.invoke(tool_args)
-        except Exception as err:
-            tool_output = {"error": "tool_execution_failed", "message": str(err)}
-    else:
-        tool_output = {"error": "unknown_tool", "message": f"Tool '{tool_name}' not found."}
+    for tool_call in tool_call_response.tool_calls:
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"]
+        call_id = tool_call["id"]
 
-    # Pass tool result back to Haiku for final conversational formulation
-    tool_msg = ToolMessage(
-        content=json.dumps(tool_output),
-        tool_call_id=tool_call["id"],
-    )
+        selected_tool = tool_map.get(tool_name)
+        if selected_tool:
+            try:
+                tool_output = selected_tool.invoke(tool_args)
+            except Exception as err:
+                tool_output = {"error": "tool_execution_failed", "message": str(err)}
+        else:
+            tool_output = {"error": "unknown_tool", "message": f"Tool '{tool_name}' not found."}
+
+        tool_outputs.append(tool_output)
+        tool_messages.append(
+            ToolMessage(
+                content=json.dumps(tool_output),
+                tool_call_id=call_id,
+            )
+        )
 
     system_tool_prompt = SystemMessage(
         content=(
-            "You are an Aurelio Coffee Co. support assistant. Explain the tool output "
-            "warmly and clearly to the customer. If the tool output contains an error "
+            "You are an Aurelio Coffee Co. support assistant. Explain the tool output(s) "
+            "warmly and clearly to the customer. If any tool output contains an error "
             "(such as a service timeout), apologize graciously and suggest retrying in a moment "
             "or offering to connect them with a human specialist."
         )
     )
 
-    final_conversation = [system_tool_prompt] + list(messages) + [tool_call_response, tool_msg]
+    final_conversation = [system_tool_prompt] + list(messages) + [tool_call_response] + tool_messages
     final_response = model.invoke(final_conversation)
+
+    primary_result = tool_outputs[0] if len(tool_outputs) == 1 else {"results": tool_outputs}
 
     return {
         "intent": "tool",
-        "tool_result": tool_output,
-        "messages": [tool_call_response, tool_msg, final_response],
+        "tool_result": primary_result,
+        "messages": [tool_call_response] + tool_messages + [final_response],
     }
 
 
