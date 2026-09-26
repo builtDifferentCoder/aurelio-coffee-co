@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: aurelio-coffee-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: oregon
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: MODEL_NAME
+        value: claude-3-5-haiku-20241022
+      - key: ALLOWED_ORIGINS
+        value: http://localhost:3000
+      - key: RATE_LIMIT_PER_IP_DAILY
+        value: "30"
+      - key: MAX_MESSAGES_PER_SESSION
+        value: "20"
+      - key: CHROMA_PERSIST_DIR
+        value: ./data/chroma_db
+      - key: ENVIRONMENT
+        value: production
+      - key: KB_DIR
+        value: ./data/knowledge_base

@@ -1,0 +1,29 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.env.local
+.env.*.local
+.venv/
+venv/
+ENV/
+
+# Chroma vector database storage
+chroma_db/
+data/chroma_db/*
+!data/chroma_db/.gitkeep
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Tests & coverage
+.pytest_cache/
+.coverage
+htmlcov/
