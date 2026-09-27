@@ -17,3 +17,4 @@ class AgentState(TypedDict):
     intent: str
     retrieved_context: list
     tool_result: Optional[dict]
+    customer_email: Optional[str]

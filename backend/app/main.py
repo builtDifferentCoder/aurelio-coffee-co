@@ -91,11 +91,12 @@ async def event_generator(session_id: str, message: str) -> AsyncGenerator[str, 
                                 tokens_streamed += 1
                                 yield f"data: {payload}\n\n"
 
-            # 3. Deterministic node responses (escalation_node, off_topic_node, or rag fallback)
+            # 3. Deterministic node responses (escalation_node, off_topic_node, rag fallback, or tool pre-check)
             elif event_type == "on_chain_end" and event.get("name") in (
                 "escalation_node",
                 "off_topic_node",
                 "rag_node",
+                "tool_node",
             ):
                 if tokens_streamed == 0:
                     node_output = event.get("data", {}).get("output", {})

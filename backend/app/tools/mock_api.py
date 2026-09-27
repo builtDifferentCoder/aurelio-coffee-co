@@ -1,5 +1,22 @@
+import contextvars
 import random
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+# Context variable to hold session customer email per async task / thread
+_session_email_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_session_email_var", default=None
+)
+
+
+def set_session_email(email: Optional[str]) -> None:
+    """Set the authenticated/scoped customer email for the current session."""
+    _session_email_var.set(email.strip().lower() if email else None)
+
+
+def get_session_email() -> Optional[str]:
+    """Get the scoped customer email for the current session."""
+    return _session_email_var.get()
+
 
 # In-memory mock databases seeded with sample customer data
 MOCK_ORDERS: Dict[str, Dict[str, Any]] = {
@@ -100,36 +117,53 @@ def _should_simulate_failure(_force_failure: bool = False) -> bool:
     return random.random() < 0.10
 
 
-def check_order_status(order_id: str, _force_failure: bool = False) -> Dict[str, Any]:
+def check_order_status(order_id: str, session_email: Optional[str] = None, _force_failure: bool = False) -> Dict[str, Any]:
     """Look up the status and shipment details for a customer order."""
     if _should_simulate_failure(_force_failure):
         return {"error": "service_timeout", "message": "Aurelio order management service timed out."}
 
+    effective_email = (session_email or get_session_email() or "").strip().lower()
     normalized_id = order_id.strip().upper()
     order = MOCK_ORDERS.get(normalized_id)
-    if not order:
+
+    # Enforce session email scoping: return generic unauthorized message without leaking existence
+    if effective_email:
+        if not order or order.get("customer_email", "").strip().lower() != effective_email:
+            return {"error": "unauthorized", "message": "I don't have access to that order."}
+    elif not order:
         return {"error": "not_found", "message": f"Order '{order_id}' was not found in our system."}
+
     return {"success": True, "order": order}
 
 
-def check_subscription_status(email: str, _force_failure: bool = False) -> Dict[str, Any]:
+def check_subscription_status(email: str, session_email: Optional[str] = None, _force_failure: bool = False) -> Dict[str, Any]:
     """Check subscription details, next billing/shipment date, and status by email."""
     if _should_simulate_failure(_force_failure):
         return {"error": "service_timeout", "message": "Aurelio subscription service timed out."}
 
+    effective_email = (session_email or get_session_email() or "").strip().lower()
     normalized_email = email.strip().lower()
+
+    if effective_email and normalized_email != effective_email:
+        return {"error": "unauthorized", "message": "I don't have access to that subscription."}
+
     sub = MOCK_SUBSCRIPTIONS.get(normalized_email)
     if not sub:
         return {"error": "not_found", "message": f"No active subscription found for '{email}'."}
     return {"success": True, "subscription": sub}
 
 
-def pause_subscription(email: str, months: int, _force_failure: bool = False) -> Dict[str, Any]:
+def pause_subscription(email: str, months: int, session_email: Optional[str] = None, _force_failure: bool = False) -> Dict[str, Any]:
     """Pause an active customer subscription for 1 to 3 months."""
     if _should_simulate_failure(_force_failure):
         return {"error": "service_timeout", "message": "Aurelio billing service timed out."}
 
+    effective_email = (session_email or get_session_email() or "").strip().lower()
     normalized_email = email.strip().lower()
+
+    if effective_email and normalized_email != effective_email:
+        return {"error": "unauthorized", "message": "I don't have access to that subscription."}
+
     sub = MOCK_SUBSCRIPTIONS.get(normalized_email)
     if not sub:
         return {"error": "not_found", "message": f"Cannot pause: no subscription found for '{email}'."}

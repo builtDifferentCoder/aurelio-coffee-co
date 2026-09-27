@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -10,6 +10,7 @@ from app.agent.prompts import RAG_ANSWER_PROMPT, ROUTER_CLASSIFICATION_PROMPT
 from app.agent.state import AgentState
 from app.core.config import settings
 from app.rag.retriever import retrieve
+from app.tools import mock_api
 from app.tools.definitions import AURELIO_TOOLS
 
 # Fixed responses
@@ -18,6 +19,56 @@ OFF_TOPIC_MESSAGE = (
     "I'm here to help with Aurelio Coffee questions — orders, subscriptions, "
     "products, and policies. What can I help with?"
 )
+
+EMAIL_REGEX = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+")
+
+
+def _extract_email_from_text(text: str) -> Optional[str]:
+    """Extract first email address from a string, stripping any trailing punctuation."""
+    match = EMAIL_REGEX.search(text)
+    if not match:
+        return None
+    cleaned = match.group(0).rstrip(".,;:!?'\"()[]{}").strip().lower()
+    return cleaned if cleaned else None
+
+
+def _extract_recent_email(messages: List[Any]) -> Optional[str]:
+    """Inspect recent messages in reverse order to find any customer email."""
+    for msg in reversed(messages):
+        content = ""
+        if isinstance(msg, HumanMessage):
+            content = str(msg.content)
+        elif isinstance(msg, dict) and msg.get("role") in ("user", "human"):
+            content = str(msg.get("content", ""))
+        elif hasattr(msg, "content") and not isinstance(msg, (AIMessage, ToolMessage, SystemMessage)):
+            content = str(msg.content)
+        email = _extract_email_from_text(content)
+        if email:
+            return email
+    return None
+
+
+def _needs_customer_lookup(user_text: str) -> bool:
+    """Determine whether a tool request requires personal order or subscription lookup."""
+    lower = user_text.lower()
+    # General pricing questions do not need personal lookup
+    is_general_pricing = any(k in lower for k in ["how much", "pricing", "compare", "plans"]) and not any(
+        k in lower for k in ["my order", "ord-", "my subscription", "pause", "status", "cancel"]
+    )
+    if is_general_pricing:
+        return False
+
+    lookup_keywords = [
+        "order",
+        "ord-",
+        "tracking",
+        "subscription",
+        "pause",
+        "shipment",
+        "deliver",
+        "package",
+    ]
+    return any(k in lower for k in lookup_keywords)
 
 # Hardcoded escalation triggers
 ESCALATION_KEYWORDS = [
@@ -65,14 +116,22 @@ def router_node(state: AgentState) -> Dict[str, Any]:
     messages = state.get("messages", [])
     user_text = _get_latest_user_text(messages)
     lower_text = user_text.lower()
+    customer_email = state.get("customer_email") or _extract_recent_email(messages)
 
     # 1. Hardcoded keyword check for immediate escalation
     if any(keyword in lower_text for keyword in ESCALATION_KEYWORDS):
-        return {"intent": "escalate"}
+        return {"intent": "escalate", "customer_email": customer_email}
 
     # Pattern check: "cancel" co-occurring with "refund", "money", or "back" anywhere in the message
     if re.search(r"\bcancel\w*\b.*?\b(refund|money|back)\b|\b(refund|money|back)\b.*?\bcancel\w*\b", lower_text, re.DOTALL):
-        return {"intent": "escalate"}
+        return {"intent": "escalate", "customer_email": customer_email}
+
+    # If user provides an email directly in response to an email prompt, route straight to tool
+    latest_email = _extract_email_from_text(user_text)
+    if latest_email:
+        customer_email = latest_email
+        if len(user_text.split()) <= 4:
+            return {"intent": "tool", "customer_email": customer_email}
 
     # 2. Otherwise classify via Claude Haiku
     model = get_model(temperature=0)
@@ -91,7 +150,7 @@ def router_node(state: AgentState) -> Dict[str, Any]:
     else:
         intent = "rag"
 
-    return {"intent": intent}
+    return {"intent": intent, "customer_email": customer_email}
 
 
 def rag_node(state: AgentState) -> Dict[str, Any]:
@@ -101,6 +160,7 @@ def rag_node(state: AgentState) -> Dict[str, Any]:
     """
     messages = state.get("messages", [])
     user_text = _get_latest_user_text(messages)
+    customer_email = state.get("customer_email")
 
     retrieved = retrieve(query=user_text, k=3, min_confidence=1.3)
 
@@ -108,6 +168,7 @@ def rag_node(state: AgentState) -> Dict[str, Any]:
         # Fall back to off_topic redirect if no relevant knowledge found
         return {
             "intent": "off_topic",
+            "customer_email": customer_email,
             "retrieved_context": [],
             "messages": [AIMessage(content=OFF_TOPIC_MESSAGE)],
         }
@@ -127,6 +188,7 @@ def rag_node(state: AgentState) -> Dict[str, Any]:
 
     return {
         "intent": "rag",
+        "customer_email": customer_email,
         "retrieved_context": retrieved,
         "messages": [answer],
     }
@@ -139,6 +201,25 @@ def tool_node(state: AgentState) -> Dict[str, Any]:
     Handles simulated errors gracefully.
     """
     messages = state.get("messages", [])
+    user_text = _get_latest_user_text(messages)
+    customer_email = state.get("customer_email") or _extract_recent_email(messages)
+
+    # Pre-check: If no customer email is set and the request needs a lookup, ask for email without calling tools
+    if not customer_email and _needs_customer_lookup(user_text):
+        return {
+            "intent": "tool",
+            "customer_email": None,
+            "tool_result": None,
+            "messages": [
+                AIMessage(
+                    content="To look up your order status or manage your subscription, please provide the email address associated with your account."
+                )
+            ],
+        }
+
+    # Set scoped session email for mock_api lookups
+    mock_api.set_session_email(customer_email)
+
     tool_map = {t.name: t for t in AURELIO_TOOLS}
 
     model = get_model(temperature=0)
@@ -150,6 +231,7 @@ def tool_node(state: AgentState) -> Dict[str, Any]:
     if not tool_call_response.tool_calls:
         return {
             "intent": "tool",
+            "customer_email": customer_email,
             "tool_result": None,
             "messages": [tool_call_response],
         }
@@ -160,7 +242,7 @@ def tool_node(state: AgentState) -> Dict[str, Any]:
 
     for tool_call in tool_call_response.tool_calls:
         tool_name = tool_call["name"]
-        tool_args = tool_call["args"]
+        tool_args = dict(tool_call["args"])
         call_id = tool_call["id"]
 
         selected_tool = tool_map.get(tool_name)
@@ -183,8 +265,11 @@ def tool_node(state: AgentState) -> Dict[str, Any]:
     system_tool_prompt = SystemMessage(
         content=(
             "You are an Aurelio Coffee Co. support assistant. Explain the tool output(s) "
-            "warmly and clearly to the customer. If any tool output contains an error "
-            "(such as a service timeout), apologize graciously and suggest retrying in a moment "
+            "warmly and clearly to the customer. "
+            "If an order or subscription lookup returns an unauthorized error or 'I don't have access to that order', "
+            "explain politely that you don't have access to that order under their account email. "
+            "Never confirm or deny whether the order exists, and never reveal whose order it is. "
+            "If any tool output contains an error (such as a service timeout), apologize graciously and suggest retrying in a moment "
             "or offering to connect them with a human specialist."
         )
     )
@@ -196,6 +281,7 @@ def tool_node(state: AgentState) -> Dict[str, Any]:
 
     return {
         "intent": "tool",
+        "customer_email": customer_email,
         "tool_result": primary_result,
         "messages": [tool_call_response] + tool_messages + [final_response],
     }
@@ -205,6 +291,7 @@ def escalation_node(state: AgentState) -> Dict[str, Any]:
     """Return fixed, non-LLM escalation response."""
     return {
         "intent": "escalate",
+        "customer_email": state.get("customer_email"),
         "retrieved_context": [],
         "messages": [
             AIMessage(
@@ -219,6 +306,7 @@ def off_topic_node(state: AgentState) -> Dict[str, Any]:
     """Return fixed, non-LLM off-topic redirect response."""
     return {
         "intent": "off_topic",
+        "customer_email": state.get("customer_email"),
         "retrieved_context": [],
         "messages": [AIMessage(content=OFF_TOPIC_MESSAGE)],
     }
